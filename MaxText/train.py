@@ -57,6 +57,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from layers import quantizations
+from te_helper import TransformerEngineHelper
 
 Transformer = models.Transformer
 EPS = 1e-8
@@ -430,7 +431,10 @@ def train_loop(config, state=None):
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
     nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+
+    logical_axis_rules = TransformerEngineHelper.extend_logical_axis_rules(config.logical_axis_rules)
+
+    with mesh, nn_partitioning.axis_rules(logical_axis_rules):
       state, metrics = p_train_step(
           state, example_batch, nextrng
       )
@@ -494,8 +498,9 @@ def main(argv: Sequence[str]) -> None:
       stack_trace_to_cloud = config.stack_trace_to_cloud,
       stack_trace_interval_seconds = config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  with diagnostic.diagnose(diagnostic_config):
-    train_loop(config)
+  with TransformerEngineHelper.fp8_autocast('replica', 'tensor', 'fsdp'):
+    with diagnostic.diagnose(diagnostic_config):
+      train_loop(config)
 
 
 if __name__ == "__main__":

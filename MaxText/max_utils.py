@@ -165,16 +165,14 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
 def initialize_jax_for_gpu(raw_keys):
   """Jax distributed initialize for GPUs."""
-  if os.environ.get("JAX_COORDINATOR_IP") is not None:
-    coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
-    coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
-    jax.distributed.initialize(
-        coordinator_address=f"{coordinator_ip}:{coordinator_port}",
-        num_processes=int(os.getenv("NNODES")),
-        process_id=int(os.getenv("NODE_RANK")),
-        initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
-    )
-    max_logging.log(f"JAX global devices: {jax.devices()}")
+  jax.distributed.initialize(
+      coordinator_address=os.environ['SLURM_LAUNCH_NODE_IPADDR']+':1234',
+      num_processes=int(os.environ['SLURM_NTASKS']),
+      process_id=int(os.environ['SLURM_PROCID']),
+      local_device_ids=[0,1,2,3,4,5,6,7],
+      initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
+  )
+  max_logging.log(f"JAX global devices: {jax.devices()}")
 
 
 def initialize_jax_for_cpu(raw_keys):

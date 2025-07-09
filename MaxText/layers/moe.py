@@ -936,11 +936,11 @@ class RoutedMoE(nn.Module):
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
     is_llama4_decoder_layer = self.config.decoder_block == DecoderBlockType.LLAMA4
-    if is_llama4_decoder_layer:
-      router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
-      inputs = inputs * router_scores
-    else:
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+    # if is_llama4_decoder_layer:
+    #   router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
+    #   inputs = inputs * router_scores
+    # else:
+    weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":

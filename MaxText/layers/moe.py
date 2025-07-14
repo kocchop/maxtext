@@ -927,6 +927,42 @@ class RoutedMoE(nn.Module):
       kernel = nn.with_logical_constraint(kernel, kernel_axes)
     return kernel
 
+  def get_group_gemm(self, in_specs, out_specs):
+    @functools.partial(
+      shard_map.shard_map,
+      mesh=self.mesh,
+      in_specs=in_specs,
+      out_specs=out_specs,
+      check_rep=False,
+    )
+    def sharded_group_gemm(x, w):
+      # import pdb;pdb.set_trace()
+
+      x_reshaped = x.reshape(x.shape[0], -1, x.shape[-1])
+      group_size = x_reshaped.shape[0]
+
+      xs = jnp.split(x_reshaped, group_size)
+      ws = jnp.split(w, group_size)
+
+      quantizer_set_list = None
+      if self.quant:
+        quantizer_set = QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e5m2,
+        is_2x2x=True
+      )
+        quantizer_set_list = tuple([quantizer_set for _ in range(group_size)])
+      # import pdb; pdb.set_trace()
+      # print(quantizer_set_list)
+      outputs = _grouped_dense(xs, ws, quantizer_set_list)
+
+      output_shape = (*x.shape[:-1], w.shape[-1])
+      output = jnp.concatenate(outputs).reshape(output_shape)
+      return output
+
+    return sharded_group_gemm
+  
   def dense_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
     """dense matrix multiplication"""
     # gate_logits: batch, length, expert
@@ -1009,12 +1045,23 @@ class RoutedMoE(nn.Module):
             dispatch,
             dispatch_axis,
         )
+
+      input_ffn1_pspec = nn.logical_to_mesh_axes(dispatch_axis)
+      w_ffn1_psepc = nn.logical_to_mesh_axes(("exp", None, "mlp"))
+      out_ffn1_psepc = nn.logical_to_mesh_axes(mlp_axis)
+      group_gemm_ffn1 = self.get_group_gemm((input_ffn1_pspec, w_ffn1_psepc), out_ffn1_psepc)
+      input_ffn2_pspec = out_ffn1_psepc
+      w_ffn2_psepc = nn.logical_to_mesh_axes(("exp", "mlp", None))
+      out_ffn2_psepc = nn.logical_to_mesh_axes(("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
+      group_gemm_ffn2 = self.get_group_gemm((input_ffn2_pspec, w_ffn2_psepc), out_ffn2_psepc)
+
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-            mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
-        )
+        # layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+        #     mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
+        # )
+        layer_w0 = group_gemm_ffn1(dispatch, w0_kernel)
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
@@ -1026,9 +1073,11 @@ class RoutedMoE(nn.Module):
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-            mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
-        )
+        # layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+        #     mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
+        # )
+        layer_w1 = group_gemm_ffn1(dispatch, w1_kernel)
+
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
@@ -1042,9 +1091,11 @@ class RoutedMoE(nn.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
-            mlp_down_einsum, layer_multiply, wo_kernel, precision=matmul_precision
-        )
+        # intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+        #     mlp_down_einsum, layer_multiply, wo_kernel, precision=matmul_precision
+        # )
+        intermediate_layer = group_gemm_ffn2(layer_multiply, wo_kernel)
+
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         if self.config.model_call_mode != "inference":

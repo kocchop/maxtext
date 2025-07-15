@@ -44,7 +44,8 @@ from MaxText.layers import quantizations
 from MaxText.layers.attentions import NdInitializer, nd_dense_init
 from MaxText.layers.initializers import default_bias_init
 from MaxText.layers.quantizations import AqtQuantization as Quant
-
+from MaxText.layers.grouped_gemm_impl import _grouped_dense
+from transformer_engine.jax.quantize import noop_quantizer_set, QuantizerFactory, ScalingMode
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
@@ -953,8 +954,6 @@ class RoutedMoE(nn.Module):
         is_2x2x=True
       )
         quantizer_set_list = tuple([quantizer_set for _ in range(group_size)])
-      # import pdb; pdb.set_trace()
-      # print(quantizer_set_list)
       outputs = _grouped_dense(xs, ws, quantizer_set_list)
 
       output_shape = (*x.shape[:-1], w.shape[-1])
@@ -1061,7 +1060,11 @@ class RoutedMoE(nn.Module):
         # layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
         #     mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
         # )
+        jax.debug.print(f"dispatch: {dispatch.shape}")
+        jax.debug.print(f"w0_kernel: {w0_kernel.shape}")
+        # breakpoint()
         layer_w0 = group_gemm_ffn1(dispatch, w0_kernel)
+        # breakpoint()
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)

@@ -307,6 +307,7 @@ def validate_model_name(s: str) -> bool:
       "gpt3-6b",
       "gpt3-52k",
       "llama4-17b-16e",
+      "llama4-17b-16e-tiny",
       "llama4-17b-128e",
   )
   if s not in valid_model_names:

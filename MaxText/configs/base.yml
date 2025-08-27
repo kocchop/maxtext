@@ -355,7 +355,7 @@ logical_axis_rules: [
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
+                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'context', 'expert']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['embed', ['fsdp', 'sequence', 'context', 'expert']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
@@ -797,3 +797,8 @@ projector_dropout_for_vit: 0.0
 subslice_shape: ""
 
 shard_optimizer_over_data: False
+
+# Expert parallelism attention optimization
+# When enabled, unshards attention parameters (Q,K,V,O projections) but keeps optimizer states sharded across expert parallel groups
+# This trades parameter memory for optimizer memory efficiency in expert parallel scenarios
+shard_attention_optimizer_over_expert: False

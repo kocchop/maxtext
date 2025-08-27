@@ -511,8 +511,11 @@ class Attention(nnx.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
+    # Use embed_no_exp for attention parameters when expert optimizer sharding is enabled
+    from MaxText import maxtext_utils
+    embed_axis = maxtext_utils.get_attention_embed_axis_name(self.config)
     kernel_axes = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else (embed_axis, "q_heads", "kv")
     )
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_q_shape),
@@ -548,10 +551,13 @@ class Attention(nnx.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
+    # Use embed_no_exp for attention parameters when expert optimizer sharding is enabled
+    from MaxText import maxtext_utils
+    embed_axis = maxtext_utils.get_attention_embed_axis_name(self.config)
     kernel_axes = (
         (None, None, None)
         if self.config.ici_context_autoregressive_parallelism > 1
-        else ("embed", "kv_heads", "kv_head_dim")
+        else (embed_axis, "kv_heads", "kv_head_dim")
     )
 
     return DenseGeneral(
@@ -591,12 +597,15 @@ class Attention(nnx.Module):
       raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
 
   def init_qkv_w(self, inputs_shape: Tuple) -> nnx.Module:
+    # Use embed_no_exp for attention parameters when expert optimizer sharding is enabled
+    from MaxText import maxtext_utils
+    embed_axis = maxtext_utils.get_attention_embed_axis_name(self.config)
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_shape),
         out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=(embed_axis, "qkv", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -615,8 +624,11 @@ class Attention(nnx.Module):
 
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
+    # Use embed_no_exp for attention parameters when expert optimizer sharding is enabled
+    from MaxText import maxtext_utils
+    embed_axis = maxtext_utils.get_attention_embed_axis_name(self.config)
     out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", embed_axis)
     )
     return DenseGeneral(
         in_features_shape=(self.num_query_heads, self.head_dim),

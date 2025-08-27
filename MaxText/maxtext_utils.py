@@ -967,7 +967,23 @@ def unbox_logicallypartioned(boxed_pytree):
       is_leaf=lambda k: isinstance(k, nn.spmd.LogicallyPartitioned),
   )
 
-def add_data_to_sharding(mesh, path, aval, sharding):
+def add_axis_to_sharding(mesh, path, aval, sharding, axis_name):
+  """Generic function to add a parallelism axis to sharding specification.
+  
+  This function adds the specified axis to a sharding specification if the tensor
+  dimension is divisible by the mesh size for that axis.
+  
+  Args:
+    mesh: The device mesh
+    path: Path to the tensor in the pytree
+    aval: Abstract value representing the tensor shape and dtype
+    sharding: Current sharding specification
+    axis_name: Name of the axis to add (e.g., 'data', 'expert')
+    
+  Returns:
+    New sharding with axis added if applicable, otherwise original sharding
+  """
+  
   if not isinstance(sharding, jax.sharding.NamedSharding):
     raise AssertionError(f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}")
   try:
@@ -976,9 +992,11 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     raise AssertionError(f"Could not shard value {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
   pspec = sharding.spec
 
-  if 'data' in jax.tree.leaves(pspec):
+  # Check if axis is already present in the sharding
+  if axis_name in jax.tree.leaves(pspec):
     return sharding
 
+  # Try to add the axis to a compatible dimension
   for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):
     if partition is None:
       partition = ()
@@ -986,17 +1004,82 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     if isinstance(partition, str):
       partition = (partition,)
 
-    if size % mesh.shape['data'] == 0 and (partition is None or 'tensor' not in partition):
-      added_component = ('data',) + partition
+    # Check if dimension is divisible by mesh size and doesn't conflict with tensor parallelism
+    if size % mesh.shape[axis_name] == 0 and (partition is None or 'tensor' not in partition):
+      added_component = (axis_name,) + partition
       new_pspec = jax.sharding.PartitionSpec(*(pspec[:idx] + (added_component,) + pspec[idx+1:]))
       new_sharding = jax.sharding.NamedSharding(sharding.mesh, new_pspec)
-      # return sharding.with_spec(new_pspec)
       return new_sharding
   return sharding
 
+def add_data_to_sharding(mesh, path, aval, sharding):
+  """Add data parallelism to sharding for optimizer states.
+  
+  This is a wrapper around add_axis_to_sharding for the 'data' axis.
+  """
+  return add_axis_to_sharding(mesh, path, aval, sharding, 'data')
+
+def add_expert_to_sharding(mesh, path, aval, sharding):
+  """Add expert parallelism to sharding for optimizer states.
+  
+  This is a wrapper around add_axis_to_sharding for the 'expert' axis.
+  Used to shard optimizer states across expert parallel groups while keeping
+  the corresponding parameters replicated (unsharded) across expert groups.
+  """
+  return add_axis_to_sharding(mesh, path, aval, sharding, 'expert')
+
+def is_attention_param(path):
+  """Check if a parameter path corresponds to attention weights (Q, K, V, O projections).
+  
+  Args:
+    path: The parameter path in the pytree
+    
+  Returns:
+    True if this is an attention parameter, False otherwise
+  """
+  path_str = jax.tree_util.keystr(path)
+  attention_param_names = [
+    'self_attention/query',
+    'self_attention/key', 
+    'self_attention/value',
+    'self_attention/out',
+    'self_attention/qkv_proj'
+  ]
+  return any(name in path_str for name in attention_param_names)
+
+def is_attention_expert_sharding_enabled(config):
+  """Check if attention-specific expert optimizer sharding is enabled.
+  
+  This optimization unshards attention parameters while keeping their optimizer 
+  states sharded across expert parallel groups.
+  
+  Args:
+    config: Model configuration
+    
+  Returns:
+    True if attention expert optimizer sharding is enabled and expert parallelism > 1
+  """
+  return getattr(config, 'shard_attention_optimizer_over_expert', False) and config.ici_expert_parallelism > 1
+
+def get_attention_embed_axis_name(config):
+  """Get the appropriate embed axis name for attention parameters.
+  
+  When shard_attention_optimizer_over_expert is enabled, use 'embed_no_exp'
+  to avoid expert sharding for attention parameters.
+  
+  Args:
+    config: Model configuration
+    
+  Returns:
+    'embed_no_exp' if attention optimizer sharding is enabled, 'embed' otherwise
+  """
+  if is_attention_expert_sharding_enabled(config):
+    return 'embed_no_exp'
+  return 'embed'
+
 def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
   prev_params_shardings = state_mesh_shardings.params
-  if config.shard_optimizer_over_data:
+  if config.shard_optimizer_over_data or config.shard_attention_optimizer_over_expert:
     if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
       sharded_fp32_params = state_mesh_shardings.opt_state.mu
     elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(state_mesh_shardings.opt_state[0], optax.ScaleByAdamState):
@@ -1008,6 +1091,7 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
     state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))
+  
   return prev_params_shardings, state_mesh_shardings
 
 def setup_initial_state(
@@ -1103,6 +1187,17 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     # Add data to sharding for optimizer state
     state_mesh_shardings = state_mesh_shardings.replace(
       opt_state=jax.tree.map_with_path(functools.partial(add_data_to_sharding, mesh), unbox_logicallypartioned(abstract_state).opt_state, state_mesh_shardings.opt_state)
+    )
+  if is_training and is_attention_expert_sharding_enabled(config):
+    
+    # Add expert to sharding for attention optimizer states only
+    def add_expert_to_attention_optimizer_state(path, aval, opt_state_sharding):
+      if is_attention_param(path):
+        return add_expert_to_sharding(mesh, path, aval, opt_state_sharding)
+      return opt_state_sharding
+    
+    state_mesh_shardings = state_mesh_shardings.replace(
+      opt_state=jax.tree.map_with_path(functools.partial(add_expert_to_attention_optimizer_state), unbox_logicallypartioned(abstract_state).opt_state, state_mesh_shardings.opt_state)
     )
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)

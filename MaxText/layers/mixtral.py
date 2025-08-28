@@ -132,6 +132,11 @@ class MixtralDecoderLayer(nn.Module):
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
+
+    # Use embed_no_exp for MoE gate when attention expert sharding is enabled
+    from MaxText import maxtext_utils
+    embed_axis = maxtext_utils.get_attention_embed_axis_name(cfg)
+    
     mlp_lnx, load_balance_loss = moe.get_routed_moe(
         name="MoeBlock_0",
         config=cfg,
@@ -139,7 +144,7 @@ class MixtralDecoderLayer(nn.Module):
         num_experts_per_tok=cfg.num_experts_per_tok,
         mesh=mesh,
         kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
+        kernel_axes=(embed_axis, None),
         intermediate_dim=cfg.mlp_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,

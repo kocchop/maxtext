@@ -1038,16 +1038,10 @@ def is_attention_param(path):
     True if this is an attention parameter, False otherwise
   """
   path_str = jax.tree_util.keystr(path)
-  #jax.debug.print(f"is_attention_param: {path_str}")
-  
-  # Based on the actual parameter paths observed in the optimizer state:
-  # [0].mu['params']['decoder']['layers_X']['self_attention']['query']['kernel']
-  # [0].mu['params']['decoder']['layers_X']['self_attention']['key']['kernel']
-  # [0].mu['params']['decoder']['layers_X']['self_attention']['value']['kernel']
-  # [0].mu['params']['decoder']['layers_X']['self_attention']['out']['kernel']
+
   attention_param_patterns = [
     "['self_attention']['query']['kernel']",
-    "['self_attention']['key']['kernel']", 
+    "['self_attention']['key']['kernel']",
     "['self_attention']['value']['kernel']",
     "['self_attention']['out']['kernel']",
     "['self_attention']['qkv_proj']['kernel']",  # For fused QKV if used

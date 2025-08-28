@@ -1038,14 +1038,17 @@ def is_attention_param(path):
     True if this is an attention parameter, False otherwise
   """
   path_str = jax.tree_util.keystr(path)
-  attention_param_names = [
-    'self_attention/query',
-    'self_attention/key', 
-    'self_attention/value',
-    'self_attention/out',
-    'self_attention/qkv_proj'
+
+  attention_param_patterns = [
+    "['self_attention']['query']['kernel']",
+    "['self_attention']['key']['kernel']",
+    "['self_attention']['value']['kernel']",
+    "['self_attention']['out']['kernel']",
+    "['self_attention']['qkv_proj']['kernel']",  # For fused QKV if used
+    "['logits_dense']['kernel']",
+    "['gate']['kernel']"
   ]
-  return any(name in path_str for name in attention_param_names)
+  return any(pattern in path_str for pattern in attention_param_patterns)
 
 def is_attention_expert_sharding_enabled(config):
   """Check if attention-specific expert optimizer sharding is enabled.

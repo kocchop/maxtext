@@ -560,12 +560,15 @@ class Decoder(nn.Module):
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
+      # Use embed_no_exp for logits layer when attention expert sharding is enabled
+      embed_axis = maxtext_utils.get_attention_embed_axis_name(cfg)
+      
       logits = linears.dense_general(
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-          kernel_axes=("embed", "vocab"),
+          kernel_axes=(embed_axis, "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=cfg.parameter_memory_host_offload,

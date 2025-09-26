@@ -39,6 +39,9 @@ from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bi
 
 import qwix.pallas as qpl
 
+from transformer_engine.jax.dense import grouped_dense
+from transformer_engine.jax.quantize import noop_quantizer_set, QuantizerFactory, ScalingMode
+
 set_xla_metadata = xla_metadata.set_xla_metadata
 
 
@@ -1394,6 +1397,39 @@ class RoutedMoE(nnx.Module):
       kernel = nn.with_logical_constraint(kernel, kernel_axes)
     return kernel
 
+  def get_group_gemm(self, in_specs, out_specs):
+    @functools.partial(
+      shard_map.shard_map,
+      mesh=self.mesh,
+      in_specs=in_specs,
+      out_specs=out_specs,
+      check_rep=False,
+    )
+    def sharded_group_gemm(x, w):
+      group_size = x.shape[0]
+      x_reshaped = x.reshape(-1, x.shape[-1])
+      n_groups = jnp.full(group_size, x_reshaped.shape[0] // group_size)
+
+      quantizer_set = noop_quantizer_set
+      if self.quant:
+        quantizer_set = QuantizerFactory.create_set(
+          scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+          fwd_dtype=jnp.float8_e4m3fn,
+          bwd_dtype=jnp.float8_e5m2,
+          is_2x2x=True,
+          n_groups=group_size
+        )
+      
+      output = grouped_dense(
+          x_reshaped, w, n_groups,
+          quantizer_set=quantizer_set
+      )
+      output = output.reshape(*x.shape[:-1], w.shape[-1])
+
+      return output
+
+    return sharded_group_gemm
+  
   def dense_matmul(
       self,
       inputs,
@@ -1414,11 +1450,13 @@ class RoutedMoE(nnx.Module):
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_norm_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
+
+    weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
       inputs = inputs * router_scores
-    else:
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+
     matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
@@ -1547,10 +1585,24 @@ class RoutedMoE(nnx.Module):
             dispatch,
             dispatch_axis,
         )
+      
+      if self.config.dense_grouped_gemm:
+        input_ffn1_pspec = nn.logical_to_mesh_axes(dispatch_axis)
+        w_ffn1_psepc = nn.logical_to_mesh_axes(("exp", None, "mlp"))
+        out_ffn1_psepc = nn.logical_to_mesh_axes(mlp_axis)
+        group_gemm_ffn1 = self.get_group_gemm((input_ffn1_pspec, w_ffn1_psepc), out_ffn1_psepc)
+        input_ffn2_pspec = out_ffn1_psepc
+        w_ffn2_psepc = nn.logical_to_mesh_axes(("exp", "mlp", None))
+        out_ffn2_psepc = nn.logical_to_mesh_axes(("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
+        group_gemm_ffn2 = self.get_group_gemm((input_ffn2_pspec, w_ffn2_psepc), out_ffn2_psepc)
+
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+        if self.config.dense_grouped_gemm:
+          layer_w0 = group_gemm_ffn1(dispatch, w0_kernel)
+        else:
+          layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -1567,7 +1619,10 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+        if self.config.dense_grouped_gemm:
+          layer_w1 = group_gemm_ffn1(dispatch, w1_kernel)
+        else:
+          layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -1584,7 +1639,10 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+        if self.config.dense_grouped_gemm:
+          intermediate_layer = group_gemm_ffn2(layer_multiply, wo_kernel)
+        else:
+          intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             mlp_down_einsum,
             layer_multiply,
             wo_kernel,

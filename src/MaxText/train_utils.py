@@ -176,23 +176,25 @@ def setup_train_loop(config, recorder, devices=None):
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     context_parallel_size = mesh.shape["context"]
-    # Check if context parallelism is being used with sequence packing
-    if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
+    # Check if all_gather context parallelism is being used with sequence packing
+    if context_parallel_size > 1 and config.packing and config.context_parallel_strategy != "ring":
       raise ValueError(
-          "Context parallelism cannot be used with sequence packing except for"
-          " synthetic data where packing is not applied. Either disable"
-          " sequence packing (set packing=False) or disable context"
-          " parallelism. Context parallelism with packing support will be added"
-          " soon."
+          "Context parallelism with 'all_gather' strategy cannot be used with sequence packing."
+          " Please use 'ring' strategy instead."
       )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with mesh:
       if context_parallel_size > 1 and config.context_parallel_load_balance:
-        data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode), data_iterator)
+        
+        # Determine load balancing reorder strategy based on whether packing is enabled
+        # DualChunkSwap (0) for non-packed, Striped (1) for packed/THD
+        reorder_strategy = 1 if config.packing else 0
+        
+        data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy), data_iterator)
         if eval_data_iterator:
           eval_data_iterator = map(
-              maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode),
+              maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode, reorder_strategy),
               eval_data_iterator,
           )
 
@@ -266,13 +268,9 @@ def validate_train_config(config):
         "fp8 can't be used with gradient_accumulation_steps right now. Please"
         " use other quantization or set gradient_accumulation_steps to 1"
     )
-
-  # Check if GPU Flash Attention is being used with sequence packing
-  if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
+  
+  if config.packing and config.dataset_type == "synthetic":
     raise ValueError(
-        "cudnn_flash_te only supports BSHD format. The THD (seq packing)"
-        " support is going to be available in Transformer Engine 2.0 release."
-        " Please disable sequence packing (set packing=False) or use a"
-        " different attention mechanism. With synthetic data, the format is not"
-        " important as packing is not applied."
+        "Sequence packing is not supported for synthetic data. Please disable"
+        " sequence packing (set packing=False)."
     )

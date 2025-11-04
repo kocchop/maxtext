@@ -1376,7 +1376,7 @@ class AttentionOp(nnx.Module):
       attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
       max_segments_per_seq = 32
     elif using_context_parallelism:
-      if attention_type == AttentionType.LOCAL_SLIDING:
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
         raise AssertionError("Sliding window attention is not supported for context parallelism. It is only supported for ring context parallelism with packing.")
       # Context parallelism without packing: only supports causal masking
       attn_mask = None
